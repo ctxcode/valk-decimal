@@ -1,0 +1,8 @@
+/// Thrown when a value cannot become a `Decimal`, or a `Decimal` cannot become another type.
+///
+/// - `syntax`: the text is not a decimal number.
+/// - `range`: the number does not fit: an exponent beyond a million, a float that is NaN or
+///   infinite, or a value outside the integer range in `to_int`.
++ error Error (syntax, range) payload {
+    message: String
+}

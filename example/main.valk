@@ -1,0 +1,32 @@
+use decimal
+use valk.json
+
+class Line {
+    product: String
+    price: decimal.Decimal
+    quantity: int
+}
+
+fn main() {
+    let lines = json.decode_to[Array[Line]]("[{\"product\":\"Book\",\"price\":\"12.99\",\"quantity\":3},{\"product\":\"Pen\",\"price\":\"0.35\",\"quantity\":10}]") ! panic("Invalid JSON")
+
+    let subtotal = decimal.from_int(0)
+    each lines as line {
+        let amount = line.price * line.quantity
+        println("%{line.product}: %amount")
+        subtotal += amount
+    }
+    let vat = (subtotal * decimal.from_int(21, 2)).round(2, .half_up)
+    println("Subtotal: %subtotal")
+    println("VAT 21%: %vat")
+    println("Total: %{subtotal + vat}")
+
+    // Split the total over four payments; the last one takes what is left
+    let total = subtotal + vat
+    let part = total.div_round(decimal.from_int(4), 2, .down)
+    let last = total - part * 3
+    println("Payments: %part, %part, %part, %last")
+
+    println(decimal.from_int(1) / 3)
+    println(json.encode(lines[0]))
+}

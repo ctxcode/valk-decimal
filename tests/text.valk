@@ -1,0 +1,71 @@
+use decimal
+
+test "Parsing" {
+    let value = decimal.parse("12.50") ! {
+        assert(false)
+        return
+    }
+    assert(value.to_string() == "12.50")
+    assert(value.scale == 2)
+    assert((decimal.parse("+7") !? decimal.Decimal {}).to_string() == "7")
+    assert((decimal.parse(".5") !? decimal.Decimal {}).to_string() == "0.5")
+    assert((decimal.parse("5.") !? decimal.Decimal {}).to_string() == "5")
+    assert((decimal.parse("1.5e-3") !? decimal.Decimal {}).to_string() == "0.0015")
+    assert((decimal.parse("2E6") !? decimal.Decimal {}).to_string() == "2000000")
+    assert((decimal.parse("-00012.3400") !? decimal.Decimal {}).to_string() == "-12.3400")
+    assert((decimal.parse("1234567890123456789012345678901234567890") !? decimal.Decimal {}).to_string() == "1234567890123456789012345678901234567890")
+
+    each Array[String]{ "", "-", "abc", "1.2.3", "1e", " 1", "1,5", "NaN" } as bad {
+        decimal.parse(bad) ! {
+            assert(error_is(E.code, syntax))
+            continue
+        }
+        assert(false)
+    }
+    decimal.parse("1e9999999") ! {
+        assert(error_is(E.code, range))
+    }
+}
+
+test "Text out" {
+    let value = decimal.parse("1234.5678") !? decimal.Decimal {}
+    assert(value.to_fixed(2) == "1234.57")
+    assert(value.to_fixed(0) == "1235")
+    assert(value.to_fixed(6) == "1234.567800")
+    assert(value.to_fixed(2, .down) == "1234.56")
+    assert("total: %value" == "total: 1234.5678")
+    let small = decimal.parse("0.0001") !? decimal.Decimal {}
+    assert(small.to_string() == "0.0001")
+    assert((decimal.parse("1E+3") !? decimal.Decimal {}).to_string() == "1000")
+    let buf = ByteBuffer.new()
+    value.to_string_into(buf) _
+    assert(buf == "1234.5678")
+}
+
+test "Integers" {
+    assert(decimal.from_int(1999, 2).to_string() == "19.99")
+    assert(decimal.from_int(-5).to_string() == "-5")
+    assert(decimal.from_int(int.$min).to_string() == "-9223372036854775808")
+    assert(decimal.from_uint(u64.$max).to_string() == "18446744073709551615")
+    assert(((decimal.parse("-12.9") !? decimal.Decimal {}).to_int() !? 0) == -12)
+    assert(((decimal.parse("1E+3") !? decimal.Decimal {}).to_int() !? 0) == 1000)
+    assert(((decimal.parse("9223372036854775807.99") !? decimal.Decimal {}).to_int() !? 0) == int.$max)
+    assert(((decimal.parse("-9223372036854775808") !? decimal.Decimal {}).to_int() !? 0) == int.$min)
+    (decimal.parse("9223372036854775808") !? decimal.Decimal {}).to_int() ! {
+        assert(error_is(E.code, range))
+    }
+}
+
+test "Floats" {
+    assert((decimal.from_float(0.1) !? decimal.Decimal {}).to_string() == "0.1")
+    assert((decimal.from_float(-2.5) !? decimal.Decimal {}).to_string() == "-2.5")
+    assert((decimal.from_float(1e22) !? decimal.Decimal {}).to_string() == "10000000000000000000000")
+    assert((decimal.from_float(1.5e-7) !? decimal.Decimal {}).to_string() == "0.00000015")
+    let nan = 0.0 / 0.0
+    decimal.from_float(nan) ! {
+        assert(error_is(E.code, range))
+    }
+    assert((decimal.parse("0.1") !? decimal.Decimal {}).to_float() == 0.1)
+    assert((decimal.parse("-1234.5678") !? decimal.Decimal {}).to_float() == -1234.5678)
+    assert((decimal.parse("1e-400") !? decimal.Decimal {}).to_float() == 0.0)
+}

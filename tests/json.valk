@@ -1,0 +1,35 @@
+use decimal
+use valk.json
+
+class Invoice {
+    number: String
+    total: decimal.Decimal
+    discount: ?decimal.Decimal
+}
+
+test "JSON" {
+    let invoice = Invoice { number: "A-1", total: decimal.parse("1234.50") !? decimal.Decimal {}, discount: null }
+    let text = json.encode(invoice)
+    assert(text == "{\"number\":\"A-1\",\"total\":\"1234.50\",\"discount\":null}")
+
+    let back = json.decode_to[Invoice](text) ! {
+        assert(false)
+        return
+    }
+    assert(back.total.to_string() == "1234.50")
+    assert(!isset(back.discount))
+
+    // Numbers too, as far as a float carries them
+    let from_number = json.decode_to[Invoice]("{\"number\":\"A-2\",\"total\":19.99,\"discount\":5}") ! {
+        assert(false)
+        return
+    }
+    assert(from_number.total.to_string() == "19.99")
+    assert((from_number.discount ?? decimal.Decimal {}).to_string() == "5")
+
+    json.decode_to[Invoice]("{\"number\":\"A-3\",\"total\":\"abc\"}") ! {
+        assert(true)
+        return
+    }
+    assert(false)
+}

@@ -1,0 +1,90 @@
+use decimal
+use valk.fs
+
+// python-samples.txt holds the answers of Python's decimal module; crosscheck.py makes it.
+
+fn num(text: String) decimal.Decimal {
+    return decimal.parse(text) ! panic("Sample does not parse: " + text)
+}
+
+fn mode(name: String) decimal.Rounding {
+    return decimal.Rounding.from_name(name) ! panic("Unknown mode: " + name)
+}
+
+fn int_of(text: String) int {
+    return text.to_int() ! panic("Not an int: " + text)
+}
+
+// The result of one sample line, as text to compare with the last column
+fn run_sample(f: Array[String]) String {
+    let op = f[0]
+    if op == "parse" : return (decimal.parse(f[1]) ! return "error " + E.code).to_string()
+    if op == "parse_error" {
+        decimal.parse(f[1]) ! return ""
+        return "parsed"
+    }
+    if op == "add" : return (num(f[1]) + num(f[2])).to_string()
+    if op == "sub" : return (num(f[1]) - num(f[2])).to_string()
+    if op == "mul" : return (num(f[1]) * num(f[2])).to_string()
+    if op == "cmp" : return num(f[1]).compare(num(f[2])).to_string()
+    if op == "div" : return (num(f[1]) / num(f[2])).to_string()
+    if op == "div_round" : return num(f[1]).div_round(num(f[2]), int_of(f[3]).to(i32), mode(f[4])).to_string()
+    if op == "round" : return num(f[1]).round(int_of(f[2]).to(i32), mode(f[3])).to_string()
+    if op == "truncate" : return num(f[1]).truncate(int_of(f[2]).to(i32)).to_string()
+    if op == "trim" : return num(f[1]).trim().to_string()
+    if op == "pow" : return num(f[1]).pow(int_of(f[2])).to_string()
+    if op == "sqrt" : return (num(f[1]).sqrt(int_of(f[2]).to(i32), mode(f[3])) ! return "error").to_string()
+    if op == "to_int" : return (num(f[1]).to_int() ! return "range").to_string()
+    return "unknown operation"
+}
+
+// Operations whose answer is compared by value, not by the digits written
+fn run_value_sample(f: Array[String]) bool {
+    let op = f[0]
+    if op == "to_float" {
+        let expected = f[2].to_float() ! return false
+        return num(f[1]).to_float() == expected
+    }
+    if op == "from_float" {
+        let value = f[1].to_float() ! return false
+        let d = decimal.from_float(value) ! return false
+        return d == num(f[2])
+    }
+    if op == "same" {
+        let a = num(f[1])
+        let b = num(f[2])
+        return a == b && a.hash() == b.hash() && a.compare(b) == 0
+    }
+    return false
+}
+
+test "Python's decimal module gives the same answers" {
+    let text = fs.read(__DIR__ + "/python-samples.txt") ! {
+        assert(false)
+        return
+    }
+    let count: uint = 0
+    let failed: uint = 0
+    each text.split("\n") as line {
+        if line.length == 0 || line[0] == '#' : continue
+        let f = line.split("\t")
+        count++
+        let ok = false
+        let got = ""
+        let op = f[0]
+        if op == "to_float" || op == "from_float" || op == "same" {
+            ok = run_value_sample(f)
+        } else {
+            got = run_sample(f)
+            let expected = op == "parse_error" ? "" : f[f.length - 1]
+            ok = got == expected
+        }
+        if !ok {
+            failed++
+            if failed <= 20 : println("mismatch: " + line.escape() + " => " + got)
+        }
+    }
+    if failed > 0 : println(failed.to_string() + " of " + count + " samples differ")
+    assert(count > 10_000)
+    assert(failed == 0)
+}

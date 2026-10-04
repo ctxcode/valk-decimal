@@ -1,0 +1,257 @@
+use valk.io
+
+/// The largest exponent `parse` accepts, either way: `1e1000000` reads, `1e1000001` does not.
++ value MAX_EXPONENT (1_000_000)
+
+/// Returns `value` divided by 10 to the power `scale`: `from_int(1999, 2)` is `19.99`.
++ fn from_int(value: int, scale: i32 (0)) Decimal {
+    if value < 0 : return make_small((0 - value).to(u64), scale, true)
+    return make_small(value.to(u64), scale, false)
+}
+
+/// Returns `value` as an unsigned integer divided by 10 to the power `scale`.
++ fn from_uint(value: u64, scale: i32 (0)) Decimal {
+    return make_small(value, scale, false)
+}
+
+/// Returns the shortest decimal that reads back as `value`: `from_float(0.1)` is `0.1`, not
+/// the `0.1000000000000000055511151231257827` the float holds exactly.
+///
+/// Throws `range` for NaN and the infinities.
++ fn from_float(value: f64) Decimal !Error {
+    if value != value || value - value != 0.0 : throw .range { message: "Not a finite number" }
+    let buf: [u8 x 64] = { 0... }
+    let length = value.to_shortest_string_in(buf)
+    return parse_bytes(&buf[0 .. length]) !>
+}
+
+/// Reads a decimal from text: `"12.50"`, `"-0.001"`, `"+7"`, `".5"`, `"1.5e-3"`, `"2E6"`.
+///
+/// The value keeps the digits as written, so `"12.50"` has scale 2. No spaces, no thousands
+/// separators. Throws `syntax` for anything else, and `range` for an exponent beyond
+/// `MAX_EXPONENT`.
++ fn parse(text: String) Decimal !Error {
+    return parse_bytes(text) !>
+}
+
+fn parse_bytes(text: &[u8]) Decimal !Error {
+    let length = text.length
+    let i: uint = 0
+    let neg = false
+    if length > 0 && (text[0] == '-' || text[0] == '+') {
+        neg = text[0] == '-'
+        i = 1
+    }
+    let c: u64 = 0
+    let digits: uint = 0
+    let significant: uint = 0
+    let frac: uint = 0
+    let point = false
+    let start = i
+    while i < length {
+        let ch = text[i]
+        if ch >= '0' && ch <= '9' {
+            digits++
+            if significant > 0 || ch != '0' : significant++
+            if significant <= 19 : c = c * 10 + (ch - '0')
+            if point : frac++
+        } else if ch == '.' && !point {
+            point = true
+        } else {
+            break
+        }
+        i++
+    }
+    let end = i
+    if digits == 0 : throw .syntax { message: "Not a decimal number" }
+    let exp: i64 = 0
+    if i < length && (text[i] == 'e' || text[i] == 'E') {
+        i++
+        let exp_neg = false
+        if i < length && (text[i] == '-' || text[i] == '+') {
+            exp_neg = text[i] == '-'
+            i++
+        }
+        let exp_digits: uint = 0
+        while i < length && text[i] >= '0' && text[i] <= '9' {
+            if exp <= MAX_EXPONENT : exp = exp * 10 + (text[i] - '0')
+            exp_digits++
+            i++
+        }
+        if exp_digits == 0 : throw .syntax { message: "Not a decimal number" }
+        if exp > MAX_EXPONENT : throw .range { message: "The exponent is too large" }
+        if exp_neg : exp = 0 - exp
+    }
+    if i < length : throw .syntax { message: "Not a decimal number" }
+    let scale = (frac.to(i64) - exp).to(i32)
+    if significant <= 19 {
+        return make_small(c, scale, neg)
+    }
+    // Too long for a u64: limbs of 9 digits, from the last digit back
+    let limbs = Array[u32].new(significant / 9 + 1)
+    let limb: u32 = 0
+    let mul: u32 = 1
+    let j = end
+    while j > start {
+        j--
+        let ch = text[j]
+        if ch == '.' : continue
+        limb += (ch - '0').to(u32) * mul
+        mul *= 10
+        if mul == BASE {
+            limbs.append(limb)
+            limb = 0
+            mul = 1
+        }
+    }
+    if mul > 1 : limbs.append(limb)
+    big_trim(limbs)
+    return make_big(limbs, scale, neg)
+}
+
+extend Decimal {
+    /// Returns the value as text with all its decimals: `12.50`, `-0.001`, `1000`.
+    ///
+    /// Never an exponent: a value with a negative scale gets its zeros written out.
+    + fn to_string() String $auto {
+        let out = ByteBuffer.new(24)
+        this.write_buffer(out)
+        return out.into_string()
+    }
+
+    /// Returns the value as text with exactly `decimals` decimals, rounded by `mode`:
+    /// `to_fixed(2)` gives `19.99`, `3.00` or `0.10`.
+    + fn to_fixed(decimals: uint, mode: Rounding (Rounding.half_even)) String {
+        return this.round(decimals.to(i32), mode).to_string()
+    }
+
+    /// Writes `to_string()` to `out` and returns the bytes written.
+    ///
+    /// A `ByteBuffer` is written directly; any other writer receives the text in one write.
+    + fn to_string_into(out: io.Writer) uint !io.IoError {
+        match out {
+            ByteBuffer as buf => {
+                let before = buf.length
+                this.write_buffer(buf)
+                return buf.length - before
+            }
+            default => return out.write(this.to_string()) !>
+        }
+    }
+
+    fn write_buffer(out: ByteBuffer) {
+        let big = this.big
+        if isset(big) {
+            // The top limb as it is, the others with their leading zeros
+            let digits = ByteBuffer.new(big.length * 9)
+            let top = big.length - 1
+            digits.write_uint_ascii(big[top])
+            let i = top
+            while i > 0 {
+                i--
+                let limb = big[i]
+                each 0 .. 9 - digits_u64(limb) : digits.write_byte('0')
+                digits.write_uint_ascii(limb)
+            }
+            write_number(out, digits, this.scale, this.negative)
+            return
+        }
+        let buf: [u8 x 20] = { 0... }
+        let n = write_digits(buf, this.small)
+        write_number(out, &buf[20 - n .. n], this.scale, this.negative)
+    }
+
+    /// Returns the whole part as an integer, the decimals cut off: `-12.9` gives `-12`.
+    ///
+    /// Throws `range` when it does not fit an `int`.
+    + fn to_int() int !Error {
+        let whole = this[0]
+        if this.scale > 0 : whole = drop_digits(this[0], this.scale.to(uint), Rounding.down)
+        if isset(whole.big) : throw .range { message: "The value does not fit an int" }
+        let ok, c = scale_up(whole.small, 0 - whole.scale.to(i64))
+        let limit: u64 = whole.negative ? 9_223_372_036_854_775_808 : 9_223_372_036_854_775_807
+        if !ok || c > limit : throw .range { message: "The value does not fit an int" }
+        if whole.negative : return (0 - c).to(int)
+        return c.to(int)
+    }
+
+    /// Returns the nearest float.
+    + fn to_float() f64 {
+        let c = this.small
+        let scale = this.scale
+        // Both parts exact as floats: one correctly rounded operation
+        if !isset(this.big) && c < 9_007_199_254_740_992 && scale >= -22 && scale <= 22 {
+            let f = c.to(f64)
+            if scale >= 0 {
+                f = f / pow10_f64(scale.to(uint))
+            } else {
+                f = f * pow10_f64((0 - scale).to(uint))
+            }
+            return this.negative ? 0.0 - f : f
+        }
+        let text = ByteBuffer.new(32)
+        let copy = this[0]
+        copy.scale = 0
+        copy.write_buffer(text)
+        text.write_byte('e')
+        text.write_int_ascii(0 - scale.to(int))
+        return text.to_string().to_float() !? 0.0
+    }
+
+    /// Returns `to_string()`: valk.json writes a Decimal as a JSON string, which keeps every
+    /// digit.
+    + fn to_json_string() String {
+        return this.to_string()
+    }
+
+    /// Reads a Decimal from a JSON string or number, for valk.json's `to_type` and `decode_to`.
+    ///
+    /// A JSON number arrives as an `int` or a float, so one with more than 15 significant digits
+    /// can lose some on the way; send those as strings. Throws `.missing` for any other value.
+    + static fn from_json_value_auto[X](value: X) Decimal !LookupError {
+        if value.is_string : return parse(value.string) ! throw .missing
+        if value.is_int : return from_int(value.int)
+        if value.is_float : return from_float(value.float) ! throw .missing
+        throw .missing
+    }
+}
+
+// Writes the coefficient's digits with the point, the sign and the zeros the scale needs
+fn write_number(out: ByteBuffer, digits: &[u8], scale: i32, neg: bool) {
+    if neg : out.write_byte('-')
+    let n = digits.length
+    if scale <= 0 {
+        out.write(digits)
+        if scale < 0 && !(n == 1 && digits[0] == '0') : each 0 .. (0 - scale).to(uint) : out.write_byte('0')
+        return
+    }
+    let s = scale.to(uint)
+    if n > s {
+        out.write(&digits[0 .. n - s])
+        out.write_byte('.')
+        out.write(&digits[n - s .. s])
+        return
+    }
+    out.write("0.")
+    each 0 .. s - n : out.write_byte('0')
+    out.write(digits)
+}
+
+// Writes the digits of value at the end of buf and returns how many
+fn write_digits(buf: local mut &[u8], value: u64) uint {
+    let n: uint = 0
+    let rest = value
+    while true {
+        n++
+        buf[20 - n] = '0' + (rest % 10).to(u8)
+        rest = rest / 10
+        if rest == 0 : break
+    }
+    return n
+}
+
+fn pow10_f64(k: uint) f64 {
+    let f = 1.0
+    each 0 .. k : f = f * 10.0
+    return f
+}

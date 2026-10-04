@@ -1,0 +1,73 @@
+use decimal
+use valk.time
+
+// Prices with two decimals, quantities and rates: the numbers of an invoice
+fn values(count: uint, seed: uint, decimals: uint) Array[decimal.Decimal] {
+    let result = Array[decimal.Decimal].new(count)
+    let x = seed
+    each 0 .. count {
+        x = (x * 6364136223846793005 + 1442695040888963407)
+        let n = ((x >> 33) % 100_000_00).to(int) + 1
+        result.append(decimal.from_int(n, decimals.to(i32)))
+    }
+    return result
+}
+
+fn report(name: String, start: uint, ops: uint) {
+    let ns = time.mono_ns() - start
+    println(name + ": " + (ns / ops) + " ns/op")
+}
+
+fn main() {
+    let n: uint = 1_000_000
+    let a = values(1000, 1, 2)
+    let b = values(1000, 2, 4)
+    let texts = a.map(fn(v: decimal.Decimal) String { return v.to_string() })
+
+    let start = time.mono_ns()
+    let sum = decimal.Decimal {}
+    each 0 .. n as i : sum = sum + a[i % 1000]
+    report("add", start, n)
+
+    start = time.mono_ns()
+    let check = decimal.Decimal {}
+    each 0 .. n as i : check = a[i % 1000] * b[i % 1000]
+    report("mul", start, n)
+
+    start = time.mono_ns()
+    each 0 .. n as i : check = a[i % 1000] / b[i % 1000]
+    report("div (28 digits)", start, n)
+
+    start = time.mono_ns()
+    each 0 .. n as i : check = a[i % 1000].div_round(b[i % 1000], 2)
+    report("div_round (2 decimals)", start, n)
+
+    start = time.mono_ns()
+    each 0 .. n as i : check = decimal.parse(texts[i % 1000]) !? check
+    report("parse", start, n)
+
+    start = time.mono_ns()
+    let length: uint = 0
+    each 0 .. n as i : length += a[i % 1000].to_string().length
+    report("to_string", start, n)
+
+    // 30 digits, past the 19 that fit the struct without an allocation
+    let big_a = a.map(fn(v: decimal.Decimal) decimal.Decimal { return v * v * v })
+    let big_b = b.map(fn(v: decimal.Decimal) decimal.Decimal { return v * v * 1000 + 1 })
+
+    start = time.mono_ns()
+    let big_sum = decimal.Decimal {}
+    each 0 .. n as i : big_sum = big_sum + big_a[i % 1000]
+    report("add (30 digits)", start, n)
+
+    start = time.mono_ns()
+    each 0 .. n as i : check = big_a[i % 1000] * big_b[i % 1000]
+    report("mul (30 digits)", start, n)
+
+    start = time.mono_ns()
+    each 0 .. n as i : check = big_a[i % 1000] / big_b[i % 1000]
+    report("div (30 digits)", start, n)
+
+    println("(" + big_sum + " " + check + ")")
+    println("(" + sum + " " + check + " " + length + ")")
+}

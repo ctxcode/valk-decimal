@@ -1,0 +1,311 @@
+// Unsigned integers of any size: base 1e9 limbs, lowest first, without high zero limbs.
+// Zero is an empty array. Results are new arrays; inputs are never changed.
+
+value BASE (1_000_000_000)
+
+global pow10_table: [u64 x 20] ({
+    1, 10, 100, 1_000, 10_000, 100_000, 1_000_000, 10_000_000, 100_000_000, 1_000_000_000,
+    10_000_000_000, 100_000_000_000, 1_000_000_000_000, 10_000_000_000_000,
+    100_000_000_000_000, 1_000_000_000_000_000, 10_000_000_000_000_000,
+    100_000_000_000_000_000, 1_000_000_000_000_000_000, 10_000_000_000_000_000_000
+})
+
+fn pow10(k: uint) u64 $inline {
+    return pow10_table[k]
+}
+
+// Digits in `value`, 1 for zero
+fn digits_u64(value: u64) uint {
+    let n: uint = 1
+    while n < 20 && value >= pow10(n) : n++
+    return n
+}
+
+fn big_from_u64(value: u64) Array[u32] {
+    let result = Array[u32].new(3)
+    let rest = value
+    while rest > 0 {
+        result.append((rest % BASE).to(u32))
+        rest = rest / BASE
+    }
+    return result
+}
+
+// The value as a u64, when it fits
+fn big_to_u64(a: Array[u32]) (bool, u64) {
+    if a.length > 3 : return (false, 0)
+    let result: u64 = 0
+    let i = a.length
+    while i > 0 {
+        i--
+        let high, low = result.mul_wide(BASE)
+        if high != 0 : return (false, 0)
+        let next = low + a[i]
+        if next < low : return (false, 0)
+        result = next
+    }
+    return (true, result)
+}
+
+fn big_trim(a: Array[u32]) {
+    while a.length > 0 && a[a.length - 1] == 0 : a.pop_last() _
+}
+
+fn big_is_zero(a: Array[u32]) bool {
+    return a.length == 0
+}
+
+fn big_cmp(a: Array[u32], b: Array[u32]) int {
+    if a.length != b.length : return a.length < b.length ? -1 : 1
+    let i = a.length
+    while i > 0 {
+        i--
+        let x = a[i]
+        let y = b[i]
+        if x != y : return x < y ? -1 : 1
+    }
+    return 0
+}
+
+fn big_add(a: Array[u32], b: Array[u32]) Array[u32] {
+    let long = a.length >= b.length ? a : b
+    let short = a.length >= b.length ? b : a
+    let result = Array[u32].new(long.length + 1)
+    let carry: u32 = 0
+    let i: uint = 0
+    while i < long.length {
+        let sum = long[i] + carry + (i < short.length ? short[i] : 0)
+        if sum >= BASE {
+            result.append(sum - BASE)
+            carry = 1
+        } else {
+            result.append(sum)
+            carry = 0
+        }
+        i++
+    }
+    if carry > 0 : result.append(carry)
+    return result
+}
+
+// a - b, where a >= b
+fn big_sub(a: Array[u32], b: Array[u32]) Array[u32] {
+    let result = Array[u32].new(a.length)
+    let borrow: u32 = 0
+    let i: uint = 0
+    while i < a.length {
+        let sub = borrow + (i < b.length ? b[i] : 0)
+        let x = a[i]
+        if x >= sub {
+            result.append(x - sub)
+            borrow = 0
+        } else {
+            result.append(x + BASE - sub)
+            borrow = 1
+        }
+        i++
+    }
+    big_trim(result)
+    return result
+}
+
+fn big_mul(a: Array[u32], b: Array[u32]) Array[u32] {
+    if a.length == 0 || b.length == 0 : return Array[u32].new()
+    let n = a.length + b.length
+    let result = Array[u32]{ 0 x n }
+    let i: uint = 0
+    while i < a.length {
+        let x: u64 = a[i]
+        if x != 0 {
+            let carry: u64 = 0
+            let j: uint = 0
+            while j < b.length {
+                let t = x * b[j] + result[i + j] + carry
+                result[i + j] = (t % BASE).to(u32)
+                carry = t / BASE
+                j++
+            }
+            let k = i + b.length
+            while carry > 0 {
+                let t = result[k] + carry
+                result[k] = (t % BASE).to(u32)
+                carry = t / BASE
+                k++
+            }
+        }
+        i++
+    }
+    big_trim(result)
+    return result
+}
+
+// a * m, where m < BASE
+fn big_mul_small(a: Array[u32], m: u32) Array[u32] {
+    let result = Array[u32].new(a.length + 1)
+    if m == 0 : return result
+    let carry: u64 = 0
+    each a as limb {
+        let t = limb.to(u64) * m + carry
+        result.append((t % BASE).to(u32))
+        carry = t / BASE
+    }
+    if carry > 0 : result.append(carry.to(u32))
+    return result
+}
+
+fn big_mul_pow10(a: Array[u32], k: uint) Array[u32] {
+    if a.length == 0 || k == 0 : return a
+    let whole = k / 9
+    let m: u64 = pow10(k % 9)
+    let result = Array[u32]{ 0 x whole }
+    let carry: u64 = 0
+    each a as limb {
+        let t = limb.to(u64) * m + carry
+        result.append((t % BASE).to(u32))
+        carry = t / BASE
+    }
+    if carry > 0 : result.append(carry.to(u32))
+    return result
+}
+
+// (a / d, a % d), where 0 < d < BASE
+fn big_divmod_small(a: Array[u32], d: u32) (Array[u32], u32) {
+    let result = Array[u32]{ 0 x a.length }
+    let rem: u64 = 0
+    let i = a.length
+    while i > 0 {
+        i--
+        let t = rem * BASE + a[i]
+        result[i] = (t / d).to(u32)
+        rem = t % d
+    }
+    big_trim(result)
+    return (result, rem.to(u32))
+}
+
+// (a / b, a % b), where b is not zero
+fn big_divmod(a: Array[u32], b: Array[u32]) (Array[u32], Array[u32]) {
+    if big_cmp(a, b) < 0 : return (Array[u32].new(), a)
+    if b.length == 1 {
+        let q, r = big_divmod_small(a, b[0])
+        let rem = Array[u32].new(1)
+        if r > 0 : rem.append(r)
+        return (q, rem)
+    }
+    // Knuth's algorithm D: scale so the top limb of the divisor is at least BASE / 2
+    let n = b.length
+    let m = a.length - n
+    let f = (BASE / (b[n - 1].to(u64) + 1)).to(u32)
+    let u = big_mul_small(a, f)
+    while u.length < a.length + 1 : u.append(0)
+    let v = big_mul_small(b, f)
+    let top: u64 = v[n - 1]
+    let second: u64 = v[n - 2]
+    let q = Array[u32]{ 0 x m + 1 }
+    let j = m + 1
+    while j > 0 {
+        j--
+        let num = u[j + n].to(u64) * BASE + u[j + n - 1]
+        let qhat = num / top
+        let rhat = num % top
+        while qhat >= BASE || qhat * second > rhat * BASE + u[j + n - 2] {
+            qhat--
+            rhat += top
+            if rhat >= BASE : break
+        }
+        // u[j .. n + 1] -= qhat * v
+        let borrow: u64 = 0
+        let carry: u64 = 0
+        let i: uint = 0
+        while i < n {
+            let p = qhat * v[i] + carry
+            carry = p / BASE
+            let sub = p % BASE + borrow
+            let x: u64 = u[i + j]
+            if x >= sub {
+                u[i + j] = (x - sub).to(u32)
+                borrow = 0
+            } else {
+                u[i + j] = (x + BASE - sub).to(u32)
+                borrow = 1
+            }
+            i++
+        }
+        let sub = carry + borrow
+        let x: u64 = u[j + n]
+        if x >= sub {
+            u[j + n] = (x - sub).to(u32)
+        } else {
+            // qhat was one too large: add v back
+            u[j + n] = (x + BASE - sub).to(u32)
+            qhat--
+            let c: u64 = 0
+            i = 0
+            while i < n {
+                let t = u[i + j].to(u64) + v[i] + c
+                u[i + j] = (t % BASE).to(u32)
+                c = t / BASE
+                i++
+            }
+            u[j + n] = ((u[j + n].to(u64) + c) % BASE).to(u32)
+        }
+        q[j] = qhat.to(u32)
+    }
+    big_trim(q)
+    // The remainder is what is left of u, scaled back
+    let rem = Array[u32]{ 0 x n }
+    let carry: u64 = 0
+    let i = n
+    while i > 0 {
+        i--
+        let t = carry * BASE + u[i]
+        rem[i] = (t / f).to(u32)
+        carry = t % f
+    }
+    big_trim(rem)
+    return (q, rem)
+}
+
+fn big_digits(a: Array[u32]) uint {
+    if a.length == 0 : return 1
+    return (a.length - 1) * 9 + digits_u64(a[a.length - 1])
+}
+
+// floor(sqrt(a))
+fn big_isqrt(a: Array[u32]) Array[u32] {
+    if a.length == 0 : return a
+    // Newton's method from a start above the root
+    let x = big_mul_pow10(big_from_u64(1), (big_digits(a) + 1) / 2)
+    while true {
+        let q, _ = big_divmod(a, x)
+        let y, _ = big_divmod_small(big_add(x, q), 2)
+        if big_cmp(y, x) >= 0 : return x
+        x = y
+    }
+}
+
+// a = a / d in place, returning a % d; 0 < d < BASE
+fn big_div_small_in_place(a: Array[u32], d: u32) u32 {
+    let rem: u64 = 0
+    let i = a.length
+    while i > 0 {
+        i--
+        let t = rem * BASE + a[i]
+        a[i] = (t / d).to(u32)
+        rem = t % d
+    }
+    big_trim(a)
+    return rem.to(u32)
+}
+
+// a = a + 1 in place
+fn big_increment(a: Array[u32]) {
+    each a as limb, i {
+        if limb + 1 < BASE {
+            a[i] = limb + 1
+            return
+        }
+        a[i] = 0
+    }
+    a.append(1)
+}

@@ -1,0 +1,140 @@
+use decimal
+
+fn d(text: String) decimal.Decimal {
+    return decimal.parse(text) ! panic("Does not parse: " + text)
+}
+
+test "Operators" {
+    let price = d("19.99")
+    assert((price + d("0.01")).to_string() == "20.00")
+    assert((price - d("20")).to_string() == "-0.01")
+    assert((price * d("3")).to_string() == "59.97")
+    assert((d("1.5") * d("1.25")).to_string() == "1.875")
+    assert((d("10") / d("4")).to_string() == "2.5")
+    assert((d("1.00") / d("2")).to_string() == "0.50")
+    assert((d("1") / d("3")).to_string() == "0.3333333333333333333333333333")
+    assert((d("2") / d("3")).to_string() == "0.6666666666666666666666666667")
+    // With integers on the right
+    assert((price * 3).to_string() == "59.97")
+    assert((price + 1).to_string() == "20.99")
+    assert((price - 20).to_string() == "-0.01")
+    assert((d("10") / 4).to_string() == "2.5")
+    // Compound assignment
+    let total = d("0")
+    total += price
+    total += price
+    total *= 2
+    assert(total.to_string() == "79.96")
+}
+
+test "Results keep every digit" {
+    let big = d("123456789012345678901234567890.123456789")
+    assert((big + big).to_string() == "246913578024691357802469135780.246913578")
+    assert((big - big).to_string() == "0.000000000")
+    assert((big * d("-1")).to_string() == "-123456789012345678901234567890.123456789")
+    // Past the u64 range and back
+    let max = d("18446744073709551615")
+    assert((max + d("1")).to_string() == "18446744073709551616")
+    assert((max + d("1") - d("1")).to_string() == "18446744073709551615")
+    assert((max * max).to_string() == "340282366920938463426481119284349108225")
+    // 0.1 + 0.2 is 0.3, unlike floats
+    assert(d("0.1") + d("0.2") == d("0.3"))
+}
+
+test "Division with a scale" {
+    assert(d("10").div_round(d("3"), 2).to_string() == "3.33")
+    assert(d("2").div_round(d("3"), 2).to_string() == "0.67")
+    assert(d("1").div_round(d("8"), 2).to_string() == "0.12")
+    assert(d("1").div_round(d("8"), 2, .half_up).to_string() == "0.13")
+    assert(d("-1").div_round(d("8"), 2, .floor).to_string() == "-0.13")
+    assert(d("-1").div_round(d("8"), 2, .ceiling).to_string() == "-0.12")
+    assert(d("100").div_round(d("7"), 0).to_string() == "14")
+    assert(d("100").div_round(d("7"), -1).to_string() == "10")
+}
+
+test "Rounding" {
+    assert(d("2.345").round(2).to_string() == "2.34")
+    assert(d("2.355").round(2).to_string() == "2.36")
+    assert(d("2.345").round(2, .half_up).to_string() == "2.35")
+    assert(d("2.345").round(2, .half_down).to_string() == "2.34")
+    assert(d("2.341").round(2, .up).to_string() == "2.35")
+    assert(d("-2.349").round(2, .down).to_string() == "-2.34")
+    assert(d("-2.341").round(2, .floor).to_string() == "-2.35")
+    assert(d("-2.349").round(2, .ceiling).to_string() == "-2.34")
+    assert(d("2.5").round().to_string() == "2")
+    assert(d("3.5").round().to_string() == "4")
+    assert(d("1.5").round(3).to_string() == "1.500")
+    assert(d("1250").round(-2).to_string() == "1200")
+    assert(d("-0.004").round(2).to_string() == "0.00")
+    assert(d("9.999").round(2).to_string() == "10.00")
+    assert(d("1.239").truncate(2).to_string() == "1.23")
+    assert(d("1.2").truncate(2).to_string() == "1.2")
+    assert(d("1.500").trim().to_string() == "1.5")
+    assert(d("100.00").trim().to_string() == "100")
+    assert(d("100").trim().to_string() == "100")
+}
+
+test "Sign and zero" {
+    let zero = decimal.Decimal {}
+    assert(zero.is_zero())
+    assert(zero.to_string() == "0")
+    assert(zero == d("0.000"))
+    assert(d("-0").to_string() == "0")
+    assert(!d("-0.00").is_negative())
+    assert(d("-3.5").abs().to_string() == "3.5")
+    assert(d("3.5").neg().to_string() == "-3.5")
+    assert(d("0").neg().to_string() == "0")
+    assert(d("-3.5").sign() == -1)
+    assert(d("0.0").sign() == 0)
+    assert(d("2").sign() == 1)
+    assert(d("1.50").scale == 2)
+}
+
+test "Comparisons" {
+    assert(d("1.0") == d("1.00"))
+    assert(d("1.0") != d("1.01"))
+    assert(d("-1") < d("0.5"))
+    assert(d("2.5") > d("2.49"))
+    assert(d("2.5") >= d("2.50"))
+    assert(d("99999999999999999999999") > d("18446744073709551615"))
+    assert(d("1.5").compare(d("1.50")) == 0)
+    assert(d("1.5").compare(d("2")) == -1)
+    let values = Array[decimal.Decimal]{ d("3"), d("-1.5"), d("2.25"), d("0") }
+    values.sort()
+    assert(values.map(fn(v: decimal.Decimal) String { return v.to_string() }) == .{ "-1.5", "0", "2.25", "3" })
+}
+
+test "Map keys" {
+    let totals = HashMap[decimal.Decimal, String]{}
+    totals.set(d("1.0"), "one")
+    assert((totals.get(d("1.00")) !? "") == "one")
+    assert((totals.get(d("1")) !? "") == "one")
+    totals.set(d("100"), "hundred")
+    assert((totals.get(d("1E+2")) !? "") == "hundred")
+    assert((totals.get(d("100.000")) !? "") == "hundred")
+    assert(!totals.has(d("10")))
+    assert(d("0").hash() == d("0.00").hash())
+    let big = d("123456789012345678901234567890")
+    assert(big.hash() == d("123456789012345678901234567890.000").hash())
+}
+
+test "Powers and roots" {
+    assert(d("1.5").pow(3).to_string() == "3.375")
+    assert(d("1.10").pow(2).to_string() == "1.2100")
+    assert(d("2").pow(100).to_string() == "1267650600228229401496703205376")
+    assert(d("7.25").pow(0).to_string() == "1")
+    assert(d("0").pow(0).to_string() == "1")
+    assert(d("2").pow(-2).to_string() == "0.25")
+    assert(d("3").pow(-1).to_string() == "0.3333333333333333333333333333")
+    let root = d("2").sqrt(10) ! {
+        assert(false)
+        return
+    }
+    assert(root.to_string() == "1.4142135624")
+    assert((d("0.25").sqrt(0) !? d("9")).to_string() == "0")
+    assert((d("0.25").sqrt(0, .half_up) !? d("9")).to_string() == "1")
+    assert((d("144").sqrt(2) !? d("9")).to_string() == "12.00")
+    d("-1").sqrt(2) ! {
+        assert(error_is(E.code, range))
+    }
+}

@@ -1,0 +1,579 @@
+use valk.math
+
+/// How a result drops the digits that do not fit: in `round`, `div_round`, `sqrt` and `to_fixed`.
+///
+/// - `half_even`: to the nearest, a tie to the even neighbour (banker's rounding).
+/// - `half_up`: to the nearest, a tie away from zero.
+/// - `half_down`: to the nearest, a tie toward zero.
+/// - `down`: toward zero.
+/// - `up`: away from zero.
+/// - `floor`: toward negative infinity.
+/// - `ceiling`: toward positive infinity.
++ enum Rounding {
+    half_even,
+    half_up,
+    half_down,
+    down,
+    up,
+    floor,
+    ceiling
+}
+
+/// Significant digits of a quotient from `/`.
++ value DIV_PRECISION (28)
+
+/// A decimal number of any size: a whole number of any length and a scale, the number of digits
+/// after the point.
+///
+/// `1.50` has the coefficient 150 and the scale 2. Adding, subtracting and multiplying are
+/// exact, and keep the scale: `1.50 + 1` is `2.50`, `1.5 * 1.25` is `1.875`. Dividing needs a
+/// limit: `a / b` gives the exact quotient when it has at most 28 significant digits and
+/// rounds to 28 otherwise, while `a.div_round(b, 2)` gives it with two decimals.
+///
+/// A struct: a value up to 20 digits takes no allocation, longer ones keep their digits in an
+/// array. Values compare by number, so `1.0 == 1.00`, and equal values hash equal for map keys.
+/// The zero value of the struct is `0`.
++ struct Decimal {
+    // The coefficient when `big` is null
+    small: u64
+    // The coefficient in base 1e9 limbs when it does not fit a u64
+    big: ?Array[u32]
+    /// The number of digits after the point. Negative for a value such as `1E+3` (`1000` with
+    /// scale -3), which only `/` and `parse` make.
+    ~+ scale: i32
+    negative: bool
+
+    /// Returns `this + other`; backs `a + b`. Exact, with the larger scale of the two.
+    + fn add(other: Decimal) Decimal $add {
+        return sum(this[0], other, other.negative)
+    }
+    /// Returns `this + other`; backs `a + 5`.
+    + fn add_int(other: int) Decimal $add {
+        return this.add(from_int(other))
+    }
+    /// Returns `this - other`; backs `a - b`. Exact, with the larger scale of the two.
+    + fn sub(other: Decimal) Decimal $sub {
+        return sum(this[0], other, !other.negative)
+    }
+    /// Returns `this - other`; backs `a - 5`.
+    + fn sub_int(other: int) Decimal $sub {
+        return this.sub(from_int(other))
+    }
+    /// Returns `this * other`; backs `a * b`. Exact: the scale is the sum of both scales.
+    + fn mul(other: Decimal) Decimal $mul {
+        let scale = scale_i32(this.scale.to(i64) + other.scale)
+        if !isset(this.big) && !isset(other.big) {
+            let high, low = this.small.mul_wide(other.small)
+            if high == 0 : return make_small(low, scale, this.negative != other.negative)
+        }
+        return make_big(big_mul(limbs_of(this[0]), limbs_of(other)), scale, this.negative != other.negative)
+    }
+    /// Returns `this * other`; backs `a * 3`.
+    + fn mul_int(other: int) Decimal $mul {
+        return this.mul(from_int(other))
+    }
+
+    /// Returns `this / other`; backs `a / b`.
+    ///
+    /// The quotient is exact when it has at most 28 significant digits, with as few decimals as
+    /// the scales allow (`1 / 4` is `0.25`, `1.00 / 2` is `0.50`); otherwise it is rounded
+    /// `half_even` to 28 significant digits (`1 / 3` is `0.3333333333333333333333333333`). These
+    /// are the rules of Python's `decimal` module. Use `div_round` for a quotient with a fixed
+    /// number of decimals. Dividing by zero panics, as it does for integers.
+    + fn div(other: Decimal) Decimal $div {
+        if other.is_zero() : panic("Division by zero")
+        let ideal = this.scale.to(i64) - other.scale
+        if this.is_zero() : return make_small(0, scale_i32(ideal), false)
+        let shift = digits_of(other).to(i64) - digits_of(this[0]).to(i64) + DIV_PRECISION + 1
+        let scale = ideal + shift
+        let neg = this.negative != other.negative
+        let q = ONE_LIMB
+        let exact = false
+        if !isset(this.big) && !isset(other.big) && shift <= 60 {
+            (q, exact) = div_scaled_u64(this.small, shift.to(uint), other.small)
+        } else {
+            let n = limbs_of(this[0])
+            let d = limbs_of(other)
+            if shift >= 0 {
+                n = big_mul_pow10(n, shift.to(uint))
+            } else {
+                d = big_mul_pow10(d, (0 - shift).to(uint))
+            }
+            let r = ONE_LIMB
+            (q, r) = big_divmod(n, d)
+            exact = big_is_zero(r)
+        }
+        if !exact {
+            // A sticky last digit, so rounding it off later knows the quotient went on
+            if q.length == 0 || q[0] % 5 == 0 : big_increment(q)
+        } else {
+            while scale > ideal && q.length > 0 && q[0] % 10 == 0 {
+                big_div_small_in_place(q, 10)
+                scale--
+            }
+        }
+        return fix_precision(q, scale, neg)
+    }
+    /// Returns `this / other`; backs `a / 3`. See `div`.
+    + fn div_int(other: int) Decimal $div {
+        return this.div(from_int(other))
+    }
+
+    /// Returns `this / other` with `scale` decimals, rounded by `mode`.
+    ///
+    /// `decimal.parse("10").div_round(decimal.parse("3"), 2)` is `3.33`. Dividing by zero panics.
+    + fn div_round(other: Decimal, scale: i32, mode: Rounding (Rounding.half_even)) Decimal {
+        if other.is_zero() : panic("Division by zero")
+        let neg = this.negative != other.negative
+        let k = scale.to(i64) - this.scale + other.scale
+        if !isset(this.big) && !isset(other.big) {
+            let ok: bool = true
+            let n = this.small
+            let d = other.small
+            if k >= 0 {
+                (ok, n) = scale_up(n, k)
+            } else {
+                (ok, d) = scale_up(d, 0 - k)
+            }
+            if ok {
+                let q = n / d
+                let r = n % d
+                if round_away(mode, neg, q % 2 == 1, half_class(r, d - r)) : q++
+                return make_small(q, scale, neg)
+            }
+        }
+        let n = limbs_of(this[0])
+        let d = limbs_of(other)
+        if k >= 0 {
+            n = big_mul_pow10(n, k.to(uint))
+        } else {
+            d = big_mul_pow10(d, (0 - k).to(uint))
+        }
+        let q, r = big_divmod(n, d)
+        let cls = 0
+        if !big_is_zero(r) {
+            let c = big_cmp(r, big_sub(d, r))
+            cls = c < 0 ? 1 : (c == 0 ? 2 : 3)
+        }
+        if round_away(mode, neg, q.length > 0 && q[0] % 2 == 1, cls) : q = big_add(q, ONE_LIMB)
+        return make_big(q, scale, neg)
+    }
+
+    /// Returns the value with exactly `scale` decimals: rounded by `mode` when it has more,
+    /// padded with zeros when it has fewer.
+    ///
+    /// `2.345` rounds to `2.34` with `round(2)` (half_even) and to `2.35` with
+    /// `round(2, .half_up)`; `2.5` becomes `2.50`. A negative scale rounds to tens, hundreds, ...
+    + fn round(scale: i32 (0), mode: Rounding (Rounding.half_even)) Decimal {
+        if scale >= this.scale {
+            let k = scale.to(i64) - this.scale
+            if !isset(this.big) {
+                let ok, c = scale_up(this.small, k)
+                if ok : return make_small(c, scale, this.negative)
+            }
+            return make_big(big_mul_pow10(limbs_of(this[0]), k.to(uint)), scale, this.negative)
+        }
+        return drop_digits(this[0], (this.scale.to(i64) - scale).to(uint), mode)
+    }
+    /// Returns the value with at most `scale` decimals, the rest cut off (rounded toward zero).
+    ///
+    /// Unlike `round`, a value with fewer decimals is returned as it is.
+    + fn truncate(scale: i32 (0)) Decimal {
+        if scale >= this.scale : return this[0]
+        return drop_digits(this[0], (this.scale.to(i64) - scale).to(uint), Rounding.down)
+    }
+    /// Returns the value without the zeros at the end of its decimals: `1.500` gives `1.5`,
+    /// `2.00` gives `2`. Whole numbers are not changed.
+    + fn trim() Decimal {
+        if this.scale <= 0 : return this[0]
+        let scale = this.scale
+        if !isset(this.big) {
+            let c = this.small
+            if c == 0 : return make_small(0, 0, false)
+            while scale > 0 && c % 10 == 0 {
+                c = c / 10
+                scale--
+            }
+            return make_small(c, scale, this.negative)
+        }
+        let c = limbs_of(this[0])
+        while scale > 0 {
+            let q, r = big_divmod_small(c, 10)
+            if r != 0 : break
+            c = q
+            scale--
+        }
+        return make_big(c, scale, this.negative)
+    }
+
+    /// Returns the value without its sign.
+    + fn abs() Decimal {
+        let result = this[0]
+        result.negative = false
+        return result
+    }
+    /// Returns the value with the opposite sign.
+    + fn neg() Decimal {
+        let result = this[0]
+        result.negative = !this.negative && !this.is_zero()
+        return result
+    }
+    /// Returns true for zero, at any scale.
+    + fn is_zero() bool {
+        return !isset(this.big) && this.small == 0
+    }
+    /// Returns true when the value is below zero.
+    + fn is_negative() bool {
+        return this.negative
+    }
+    /// Returns -1, 0 or 1 for a value below, at or above zero.
+    + fn sign() int {
+        if this.is_zero() : return 0
+        return this.negative ? -1 : 1
+    }
+
+    /// Returns this value to the power `exponent`.
+    ///
+    /// A positive exponent is exact: `1.5` to the power 3 is `3.375`. A negative one divides 1 by the
+    /// power with `/`, so it rounds to 28 significant digits; zero to a negative power panics as
+    /// a division by zero. Any value to the power 0 is `1`.
+    + fn pow(exponent: int) Decimal {
+        if exponent < 0 : return from_int(1).div(this.pow(0 - exponent))
+        let result = from_int(1)
+        let base = this[0]
+        let rest = exponent.to(uint)
+        while rest > 0 {
+            if rest & 1 == 1 : result = result.mul(base)
+            rest = rest >> 1
+            if rest > 0 : base = base.mul(base)
+        }
+        return result
+    }
+
+    /// Returns the square root with `scale` decimals, rounded by `mode`.
+    ///
+    /// Throws `range` for a negative value.
+    + fn sqrt(scale: i32, mode: Rounding (Rounding.half_even)) Decimal !Error {
+        if this.negative : throw .range { message: "The square root of a negative number" }
+        // One digit more than asked, with a sticky last digit when the root is not exact, then
+        // rounded once: the way Python's decimal avoids rounding twice
+        let k = (scale.to(i64) + 1) * 2 - this.scale
+        let inexact = false
+        let m = limbs_of(this[0])
+        if k >= 0 {
+            m = big_mul_pow10(m, k.to(uint))
+        } else {
+            let q, cls = drop_coefficient(m, (0 - k).to(uint))
+            m = q
+            inexact = cls != 0
+        }
+        let fits, small = big_to_u64(m)
+        if fits {
+            let r = isqrt_u64(small)
+            let high, low = r.mul_wide(r)
+            if high != 0 || low != small : inexact = true
+            if inexact && r % 5 == 0 : r++
+            return drop_digits(make_small(r, scale + 1, false), 1, mode)
+        }
+        let root = big_isqrt(m)
+        if big_cmp(big_mul(root, root), m) != 0 : inexact = true
+        if inexact && (root.length == 0 || root[0] % 5 == 0) : root = big_add(root, ONE_LIMB)
+        return drop_digits(make_big(root, scale + 1, false), 1, mode)
+    }
+
+    /// Returns -1, 0 or 1 when this value is below, equal to or above `other`.
+    + fn compare(other: Decimal) int {
+        if this.negative != other.negative : return this.negative ? -1 : 1
+        let c = compare_abs(this[0], other)
+        return this.negative ? 0 - c : c
+    }
+    /// Returns whether both are the same number, whatever their scales; backs `==`.
+    + fn equals(other: Decimal) bool $eq {
+        return this.compare(other) == 0
+    }
+    /// Backs `<`.
+    + fn lt(other: Decimal) bool $lt {
+        return this.compare(other) < 0
+    }
+    /// Backs `>`.
+    + fn gt(other: Decimal) bool $gt {
+        return this.compare(other) > 0
+    }
+    /// Returns a hash that is the same for equal values, `1.0` and `1.00` too; backs map keys.
+    + fn hash() uint $hash {
+        let scale = this.scale.to(i64)
+        let c: u64 = 0
+        if !isset(this.big) {
+            c = this.small
+            if c == 0 : return 0
+            while c % 10 == 0 {
+                c = c / 10
+                scale--
+            }
+        } else {
+            let limbs = limbs_of(this[0])
+            while true {
+                let q, r = big_divmod_small(limbs, 10)
+                if r != 0 : break
+                limbs = q
+                scale--
+            }
+            let fits, v = big_to_u64(limbs)
+            if fits {
+                c = v
+            } else {
+                let h: u64 = 0xcbf29ce484222325
+                each limbs as limb : h = (h ^ limb) * 0x100000001b3
+                c = h
+            }
+        }
+        let h = (c ^ (scale.to(u64) * 0x9e3779b97f4a7c15)) * 0xbf58476d1ce4e5b9
+        if this.negative : h = ~h
+        return (h ^ (h >> 31)).to(uint)
+    }
+}
+
+global ONE_LIMB: Array[u32] (.{ 1 })
+
+fn make_small(c: u64, scale: i32, neg: bool) Decimal $inline {
+    return Decimal { small: c, scale: scale, negative: neg && c != 0 }
+}
+
+fn make_big(limbs: Array[u32], scale: i32, neg: bool) Decimal {
+    let fits, v = big_to_u64(limbs)
+    if fits : return make_small(v, scale, neg)
+    return Decimal { big: limbs, scale: scale, negative: neg }
+}
+
+fn limbs_of(d: Decimal) Array[u32] {
+    return d.big ?? big_from_u64(d.small)
+}
+
+fn digits_of(d: Decimal) uint {
+    let big = d.big
+    if isset(big) : return big_digits(big)
+    return digits_u64(d.small)
+}
+
+fn scale_i32(scale: i64) i32 {
+    if scale > i32.$max || scale < i32.$min : panic("Decimal scale out of range")
+    return scale.to(i32)
+}
+
+// c * 10^k, when it fits a u64
+fn scale_up(c: u64, k: i64) (bool, u64) $inline {
+    if c == 0 || k == 0 : return (true, c)
+    if k > 19 : return (false, 0)
+    let high, low = c.mul_wide(pow10(k.to(uint)))
+    return (high == 0, low)
+}
+
+// a + b, with b's sign given
+fn sum(a: Decimal, b: Decimal, b_neg: bool) Decimal {
+    let scale = a.scale >= b.scale ? a.scale : b.scale
+    if !isset(a.big) && !isset(b.big) {
+        let ok, x = scale_up(a.small, scale.to(i64) - a.scale)
+        let ok2, y = scale_up(b.small, scale.to(i64) - b.scale)
+        if ok && ok2 {
+            if a.negative == b_neg {
+                let s = x + y
+                if s >= x : return make_small(s, scale, a.negative)
+            } else if x >= y {
+                return make_small(x - y, scale, a.negative)
+            } else {
+                return make_small(y - x, scale, b_neg)
+            }
+        }
+    }
+    let x = big_mul_pow10(limbs_of(a), (scale.to(i64) - a.scale).to(uint))
+    let y = big_mul_pow10(limbs_of(b), (scale.to(i64) - b.scale).to(uint))
+    if a.negative == b_neg : return make_big(big_add(x, y), scale, a.negative)
+    if big_cmp(x, y) >= 0 : return make_big(big_sub(x, y), scale, a.negative)
+    return make_big(big_sub(y, x), scale, b_neg)
+}
+
+fn compare_abs(a: Decimal, b: Decimal) int {
+    let scale = a.scale >= b.scale ? a.scale : b.scale
+    if !isset(a.big) && !isset(b.big) {
+        let ok, x = scale_up(a.small, scale.to(i64) - a.scale)
+        let ok2, y = scale_up(b.small, scale.to(i64) - b.scale)
+        // A coefficient that overflows when scaled up is the larger one
+        if !ok : return 1
+        if !ok2 : return -1
+        if x == y : return 0
+        return x < y ? -1 : 1
+    }
+    let x = big_mul_pow10(limbs_of(a), (scale.to(i64) - a.scale).to(uint))
+    let y = big_mul_pow10(limbs_of(b), (scale.to(i64) - b.scale).to(uint))
+    return big_cmp(x, y)
+}
+
+// 0: no remainder, 1: below half, 2: exactly half, 3: above half; for a remainder r with
+// `rest` = divisor - r
+fn half_class(r: u64, rest: u64) int $inline {
+    if r == 0 : return 0
+    if r < rest : return 1
+    return r == rest ? 2 : 3
+}
+
+// Whether a quotient rounds away from zero, given the class of what was dropped
+fn round_away(mode: Rounding, neg: bool, odd: bool, cls: int) bool {
+    if cls == 0 : return false
+    return match mode : bool {
+        Rounding.half_even => cls == 3 || (cls == 2 && odd)
+        Rounding.half_up => cls >= 2
+        Rounding.half_down => cls == 3
+        Rounding.down => false
+        Rounding.up => true
+        Rounding.floor => neg
+        Rounding.ceiling => !neg
+    }
+}
+
+// The coefficient without its last k digits, and the class of what was dropped
+fn drop_coefficient(a: Array[u32], k: uint) (Array[u32], int) {
+    let whole = k / 9
+    let part = k % 9
+    if whole >= a.length {
+        if a.length == 0 : return (a, 0)
+        let half = big_mul_pow10(big_from_u64(5), k - 1)
+        let c = big_cmp(a, half)
+        return (Array[u32].new(), c < 0 ? 1 : (c == 0 ? 2 : 3))
+    }
+    let low = false
+    let high = Array[u32].new(a.length - whole)
+    each a as limb, i {
+        if i < whole {
+            if limb != 0 && (part > 0 || i + 1 < whole) : low = true
+        } else {
+            high.append(limb)
+        }
+    }
+    if part == 0 {
+        let top = a[whole - 1]
+        if top == 0 : return (high, low ? 1 : 0)
+        if top < 500_000_000 : return (high, 1)
+        if top == 500_000_000 && !low : return (high, 2)
+        return (high, 3)
+    }
+    let q, r = big_divmod_small(high, pow10(part).to(u32))
+    let half = (pow10(part) / 2).to(u32)
+    if r == 0 : return (q, low ? 1 : 0)
+    if r < half : return (q, 1)
+    if r == half && !low : return (q, 2)
+    return (q, 3)
+}
+
+// The value without its last k digits, rounded by mode
+fn drop_digits(d: Decimal, k: uint, mode: Rounding) Decimal {
+    let scale = scale_i32(d.scale.to(i64) - k.to(i64))
+    if !isset(d.big) {
+        let c = d.small
+        if k > 19 {
+            let up = round_away(mode, d.negative, false, c == 0 ? 0 : 1)
+            return make_small(up ? 1 : 0, scale, d.negative)
+        }
+        let p = pow10(k)
+        let q = c / p
+        let r = c % p
+        if round_away(mode, d.negative, q % 2 == 1, half_class(r, p - r)) : q++
+        return make_small(q, scale, d.negative)
+    }
+    let q, cls = drop_coefficient(limbs_of(d), k)
+    if round_away(mode, d.negative, q.length > 0 && q[0] % 2 == 1, cls) : q = big_add(q, ONE_LIMB)
+    return make_big(q, scale, d.negative)
+}
+
+// Rounds a quotient to DIV_PRECISION significant digits; changes q
+fn fix_precision(q: Array[u32], scale: i64, neg: bool) Decimal {
+    let digits = big_digits(q)
+    if digits <= DIV_PRECISION : return make_big(q, scale_i32(scale), neg)
+    let k = digits - DIV_PRECISION
+    if k > 9 : return drop_digits(make_big(q, scale_i32(scale), neg), k, Rounding.half_even)
+    let p = pow10(k).to(u32)
+    let r = big_div_small_in_place(q, p)
+    if round_away(Rounding.half_even, neg, q.length > 0 && q[0] % 2 == 1, half_class(r, p - r)) {
+        big_increment(q)
+        // 99..9 rounded up to 10..0
+        if big_digits(q) > DIV_PRECISION {
+            big_div_small_in_place(q, 10)
+            k++
+        }
+    }
+    return make_big(q, scale_i32(scale - k.to(i64)), neg)
+}
+
+// floor(c * 10^shift / d) in base 1e9 limbs, and whether nothing was left over
+fn div_scaled_u64(c: u64, shift: uint, d: u64) (Array[u32], bool) {
+    // The limbs of c * 10^shift: c * 10^(shift % 9) as 128 bits, then zero limbs
+    let n: [u32 x 16] = { 0... }
+    let count = shift / 9
+    let high, low = c.mul_wide(pow10(shift % 9))
+    while high > 0 || low > 0 {
+        let qh = high / BASE
+        let ql, r = div128(high % BASE, low, BASE)
+        n[count++] = r.to(u32)
+        high = qh
+        low = ql
+    }
+    let q = Array[u32]{ 0 x count }
+    let rem: u64 = 0
+    let i = count
+    while i > 0 {
+        i--
+        let h, l = rem.mul_wide(BASE)
+        let next = l + n[i]
+        if next < l : h++
+        let qi, r = div128(h, next, d)
+        q[i] = qi.to(u32)
+        rem = r
+    }
+    big_trim(q)
+    return (q, rem == 0)
+}
+
+// (high * 2^64 + low) / d and the remainder, where high < d (Hacker's Delight, divlu)
+fn div128(high: u64, low: u64, d: u64) (u64, u64) {
+    if high == 0 : return (low / d, low % d)
+    let s = d.leading_zeros()
+    let v = d << s
+    let un32 = s == 0 ? high : (high << s) | (low >> (64 - s))
+    let un10 = low << s
+    let vn1 = v >> 32
+    let vn0 = v & 0xffff_ffff
+    let un1 = un10 >> 32
+    let un0 = un10 & 0xffff_ffff
+    let q1 = un32 / vn1
+    let rhat = un32 - q1 * vn1
+    while q1 > 0xffff_ffff || q1 * vn0 > (rhat << 32) + un1 {
+        q1--
+        rhat += vn1
+        if rhat > 0xffff_ffff : break
+    }
+    let un21 = (un32 << 32) + un1 - q1 * v
+    let q0 = un21 / vn1
+    rhat = un21 - q0 * vn1
+    while q0 > 0xffff_ffff || q0 * vn0 > (rhat << 32) + un0 {
+        q0--
+        rhat += vn1
+        if rhat > 0xffff_ffff : break
+    }
+    let r = ((un21 << 32) + un0 - q0 * v) >> s
+    return ((q1 << 32) + q0, r)
+}
+
+fn isqrt_u64(n: u64) u64 {
+    let r = math.sqrt(n.to(f64)).to(u64)
+    while true {
+        let high, low = r.mul_wide(r)
+        if high == 0 && low <= n : break
+        r--
+    }
+    while true {
+        let next = r + 1
+        let high, low = next.mul_wide(next)
+        if high != 0 || low > n : break
+        r = next
+    }
+    return r
+}
