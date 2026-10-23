@@ -3,7 +3,7 @@
 Decimal numbers of any size for [Valk](https://valk-lang.dev): exact sums of money, database
 `NUMERIC` values, and division with the rounding you choose. Purely written in Valk.
 
-Requires Valk 0.7.8 or newer.
+Requires Valk 0.8.0 or newer.
 
 ## Install
 

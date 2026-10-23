@@ -34,7 +34,7 @@ use valk.io
     return parse_bytes(text) !>
 }
 
-fn parse_bytes(text: &[u8]) Decimal !Error {
+fn parse_bytes(text: local &[u8]) Decimal !Error {
     let length = text.length
     let i: uint = 0
     let neg = false
@@ -217,7 +217,7 @@ extend Decimal {
 }
 
 // Writes the coefficient's digits with the point, the sign and the zeros the scale needs
-fn write_number(out: ByteBuffer, digits: &[u8], scale: i32, neg: bool) {
+fn write_number(out: ByteBuffer, digits: local &[u8], scale: i32, neg: bool) {
     if neg : out.write_byte('-')
     let n = digits.length
     if scale <= 0 {

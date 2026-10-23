@@ -300,7 +300,7 @@ use valk.math
         return this.compare(other) > 0
     }
     /// Returns a hash that is the same for equal values, `1.0` and `1.00` too; backs map keys.
-    + fn hash() uint $hash {
+    + fn hash() uint {
         let scale = this.scale.to(i64)
         let c: u64 = 0
         if !isset(this.big) {
